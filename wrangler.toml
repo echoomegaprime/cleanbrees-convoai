@@ -1,0 +1,14 @@
+name = "cleanbrees-convoai"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+CLEANBREES_API_URL = "https://cleanbrees-api.bmcii1976.workers.dev"
+BREE_VOICE_ID = "pzKXffibtCDxnrVO8d1U"
+BUSINESS_PHONE = "+14329997402"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cleanbrees-db"
+database_id = "1f72e1e8-e6aa-4ef7-a1e6-9b7c873abfe8"
