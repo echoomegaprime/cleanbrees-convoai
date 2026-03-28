@@ -39,6 +39,7 @@ interface Env {
   BREE_VOICE_ID: string;
   BUSINESS_PHONE: string;
   CONVOAI_AGENT_ID: string;
+  OWNER_PHONE: string; // Commander's phone for emergency forwarding
 }
 
 // ============================================================================
@@ -96,6 +97,26 @@ const OTHER_SERVICES: Record<string, { label: string; price: number; unit: strin
   postconstruction: { label: 'Post Construction', price: 300, unit: 'starting at' },
   deep:        { label: 'Deep Clean',         price: 200, unit: 'starting at' },
   carpet:      { label: 'Carpet Cleaning (Vacuum + Shampoo)', price: 70, unit: 'per room (heavy vacuum 4+ passes + double shampoo, 5 rooms = $350)' },
+  // RAH (Right at Home) Handyman Services
+  handyman:    { label: 'General Handyman',   price: 75, unit: 'per hour' },
+  plumbing:    { label: 'Plumbing Repair',    price: 125, unit: 'per visit (parts extra)' },
+  electrical:  { label: 'Electrical Work',    price: 125, unit: 'per visit (parts extra)' },
+  painting:    { label: 'Painting',           price: 200, unit: 'per room' },
+  drywall:     { label: 'Drywall Repair',     price: 100, unit: 'per patch/area' },
+  doorlock:    { label: 'Door & Lock Service', price: 85, unit: 'per door' },
+  faucet:      { label: 'Faucet Install/Repair', price: 150, unit: 'per faucet (parts extra)' },
+  toilet:      { label: 'Toilet Install/Repair', price: 175, unit: 'per toilet (parts extra)' },
+  ceilingfan:  { label: 'Ceiling Fan Install', price: 125, unit: 'per fan (fan not included)' },
+  gutter:      { label: 'Gutter Cleaning',    price: 150, unit: 'per house' },
+  fence:       { label: 'Fence Repair',       price: 175, unit: 'starting at (materials extra)' },
+  tile:        { label: 'Tile Repair',        price: 200, unit: 'per area (materials extra)' },
+  flooring:    { label: 'Flooring Install',   price: 5, unit: 'per sq ft (materials extra)' },
+  shelving:    { label: 'Shelf & Shelving Install', price: 65, unit: 'per unit' },
+  furniture:   { label: 'Furniture Assembly',  price: 75, unit: 'per item' },
+  applianceinstall: { label: 'Appliance Installation', price: 100, unit: 'per appliance' },
+  smokedetector: { label: 'Smoke Detector Install', price: 35, unit: 'per detector' },
+  caulking:    { label: 'Caulking & Sealing', price: 60, unit: 'per area (tub, shower, windows)' },
+  blinds:      { label: 'Blinds & Curtain Install', price: 50, unit: 'per window' },
 };
 
 // Volume discount tiers
@@ -279,7 +300,9 @@ IMPORTANT PRICING NOTES:
 - For haul-offs, give the starting price but let them know the final price depends on what they have and dump fees that day.
 - Carpet cleaning is $70 per room — includes heavy vacuuming (4+ passes until no more pet hair/dirt) plus double shampoo. 5 rooms is $350. Great for pet owners and move-in/move-out.
 14. When asked about employee-related things, you manage the team. Use tools to check schedules and route workers.
-15. For driving directions, use the get_directions tool to help workers or customers find locations.`;
+15. For driving directions, use the get_directions tool to help workers or customers find locations.
+16. EMERGENCY/URGENT CALLS: If a caller says it's an emergency, urgent, needs to speak to Bree or the owner right away, or there's a safety issue (water leak at a job site, injury, etc.), use the forward_to_owner tool. Say something like "Let me connect you with Bree right now, one moment please." This forwards them to Bree's personal line.
+17. RAH (RIGHT AT HOME) HANDYMAN SERVICES: We also offer a full range of handyman services through our Right at Home division. This includes plumbing, electrical, painting, drywall, door/lock service, faucet and toilet work, ceiling fans, gutter cleaning, fence repair, tile, flooring, shelving, furniture assembly, appliance installation, smoke detectors, caulking, and blinds installation. Quote these the same way — use the pricing in OTHER SERVICES above. For handyman work, always mention that parts and materials are extra unless otherwise noted.`;
 }
 
 // ============================================================================
@@ -297,7 +320,7 @@ function getToolDefinitions(): any[] {
         properties: {
           service_type: {
             type: 'string',
-            enum: ['residential', 'commercial', 'lawn', 'lawn-full', 'pressure', 'trash', 'appliance', 'moveinout', 'postconstruction', 'deep'],
+            enum: ['residential', 'commercial', 'lawn', 'lawn-full', 'pressure', 'trash', 'appliance', 'moveinout', 'postconstruction', 'deep', 'carpet', 'handyman', 'plumbing', 'electrical', 'painting', 'drywall', 'doorlock', 'faucet', 'toilet', 'ceilingfan', 'gutter', 'fence', 'tile', 'flooring', 'shelving', 'furniture', 'applianceinstall', 'smokedetector', 'caulking', 'blinds'],
             description: 'Type of service requested'
           },
           bedrooms: { type: 'number', description: 'Number of bedrooms (residential)' },
@@ -339,7 +362,7 @@ function getToolDefinitions(): any[] {
           customer_email: { type: 'string', description: 'Customer email (optional)' },
           service_type: {
             type: 'string',
-            enum: ['residential', 'commercial', 'lawn', 'lawn-full', 'pressure', 'trash', 'appliance', 'moveinout', 'postconstruction', 'deep'],
+            enum: ['residential', 'commercial', 'lawn', 'lawn-full', 'pressure', 'trash', 'appliance', 'moveinout', 'postconstruction', 'deep', 'carpet', 'handyman', 'plumbing', 'electrical', 'painting', 'drywall', 'doorlock', 'faucet', 'toilet', 'ceilingfan', 'gutter', 'fence', 'tile', 'flooring', 'shelving', 'furniture', 'applianceinstall', 'smokedetector', 'caulking', 'blinds'],
             description: 'Service type'
           },
           address: { type: 'string', description: 'Service address (street)' },
@@ -401,6 +424,19 @@ function getToolDefinitions(): any[] {
         required: ['to', 'message'],
       },
     },
+    {
+      type: 'webhook',
+      name: 'forward_to_owner',
+      description: 'Forward the current call to the business owner (Bree). Use this ONLY for emergencies, urgent matters, or when the caller specifically requests to speak to Bree or the owner. Say "Let me connect you with Bree right now" before calling this.',
+      parameters: {
+        type: 'object',
+        properties: {
+          reason: { type: 'string', description: 'Brief reason for forwarding (e.g. "emergency water leak", "caller requested owner")' },
+          caller_phone: { type: 'string', description: 'The caller phone number if available' },
+        },
+        required: ['reason'],
+      },
+    },
   ];
 }
 
@@ -422,6 +458,8 @@ async function executeTool(toolName: string, params: any, env: Env): Promise<str
       return await handleGetDirections(params, env);
     case 'send_sms':
       return await handleSendSMS(params, env);
+    case 'forward_to_owner':
+      return await handleForwardToOwner(params, env);
     default:
       return `Unknown tool: ${toolName}`;
   }
@@ -430,8 +468,9 @@ async function executeTool(toolName: string, params: any, env: Env): Promise<str
 function handleCalculateQuote(params: any): string {
   const svcType = params.service_type;
 
-  // Other services (non room-based)
-  if (['lawn', 'lawn-full', 'pressure', 'trash', 'appliance', 'moveinout', 'postconstruction', 'deep'].includes(svcType)) {
+  // Other services (non room-based) — includes cleaning add-ons + RAH handyman
+  const otherServiceKeys = Object.keys(OTHER_SERVICES);
+  if (otherServiceKeys.includes(svcType)) {
     const svc = OTHER_SERVICES[svcType];
     if (!svc) return 'Service not found.';
     const qty = params.quantity || 1;
@@ -658,6 +697,40 @@ async function handleSendSMS(params: any, env: Env): Promise<string> {
   }
 }
 
+async function handleForwardToOwner(params: any, env: Env): Promise<string> {
+  const ownerPhone = env.OWNER_PHONE || '+14322248166';
+  const reason = params.reason || 'caller requested';
+  const callerPhone = params.caller_phone || 'unknown';
+
+  // Send SMS to owner alerting them about the incoming forward
+  if (env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) {
+    try {
+      await fetch(
+        `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Basic ' + btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`),
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({
+            To: ownerPhone,
+            From: env.BUSINESS_PHONE || '+14329997402',
+            Body: `[Clean Bree's] Call forwarding to you. Reason: ${reason}. Caller: ${callerPhone}`,
+          }),
+        }
+      );
+    } catch (e) {
+      log('warn', 'Failed to send forward alert SMS', { error: (e as Error).message });
+    }
+  }
+
+  log('info', 'Call forwarded to owner', { reason, callerPhone, ownerPhone });
+
+  // Return instruction — the ConvoAI agent will say this and the TwiML redirect will handle the actual forward
+  return `FORWARD_CALL:${ownerPhone}|Connecting you to Bree now. One moment please — I'm transferring your call.`;
+}
+
 // ============================================================================
 // ELEVENLABS CONVOAI AGENT MANAGEMENT
 // ============================================================================
@@ -798,9 +871,10 @@ app.get('/health', (c) => {
   return c.json({
     status: 'ok',
     service: 'cleanbrees-convoai',
-    version: '1.0.0',
+    version: '2.0.0',
     agent_id: c.env.CONVOAI_AGENT_ID || 'not configured',
     phone: c.env.BUSINESS_PHONE,
+    services: Object.keys(OTHER_SERVICES).length + ' other services + residential + commercial',
   });
 });
 
@@ -856,6 +930,23 @@ app.post('/twilio/voice', async (c) => {
   return new Response(twiml, {
     headers: { 'Content-Type': 'text/xml' },
   });
+});
+
+// ---------------------------------------------------------------------------
+// TWILIO CALL FORWARD — Transfers call to owner for emergencies
+// ---------------------------------------------------------------------------
+app.post('/twilio/forward', async (c) => {
+  const ownerPhone = c.env.OWNER_PHONE || '+14322248166';
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Connecting you now. Please hold.</Say>
+  <Dial callerId="${c.env.BUSINESS_PHONE || '+14329997402'}" timeout="30">
+    <Number>${ownerPhone}</Number>
+  </Dial>
+  <Say voice="Polly.Joanna">I'm sorry, Bree is unavailable right now. Please leave a message after the beep and she will call you back.</Say>
+  <Record maxLength="120" transcribe="true" />
+</Response>`;
+  return new Response(twiml, { headers: { 'Content-Type': 'text/xml' } });
 });
 
 // ---------------------------------------------------------------------------
