@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "cleanbrees-convoai",
+  "capabilities": [],
+  "note": "Plain Cloudflare Worker for a client business (Clean Bree's Cleaning Service). Driven by Twilio and ElevenLabs webhooks, not registered via the Echo SDK gate.",
+  "entrypoints": ["scripts/certforge_journey.py"],
+  "data_classification": "restricted",
+  "network": "internal"
+}

@@ -16,3 +16,14 @@ database_id = "1f72e1e8-e6aa-4ef7-a1e6-9b7c873abfe8"
 [[analytics_engine_datasets]]
 binding = "ANALYTICS"
 dataset = "echo_metrics"
+
+# Secrets (set via wrangler secret put):
+# ELEVENLABS_API_KEY   - ElevenLabs API key for ConvoAI agent management
+# TWILIO_ACCOUNT_SID   - Twilio account SID
+# TWILIO_AUTH_TOKEN    - Twilio auth token (also keys X-Twilio-Signature verification)
+# GOOGLE_MAPS_API_KEY  - optional, falls back to a plain Maps link if unset
+# CONVOAI_AGENT_ID     - set after running POST /setup/agent
+# OWNER_PHONE          - Commander's phone for emergency call forwarding
+# ADMIN_API_KEY        - gates POST /setup/agent, /setup/twilio, /setup/db
+# CONVOAI_WEBHOOK_SECRET - shared secret ElevenLabs echoes back on every POST /convoai/tools call;
+#                          createOrUpdateAgent() refuses to publish an agent config if this is unset

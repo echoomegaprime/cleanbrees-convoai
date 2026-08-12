@@ -29,7 +29,7 @@ function log(level: 'info' | 'warn' | 'error' | 'debug', message: string, data?:
 // TYPES
 // ============================================================================
 
-interface Env {
+export interface Env {
   DB: D1Database;
   ELEVENLABS_API_KEY: string;
   TWILIO_ACCOUNT_SID: string;
@@ -40,6 +40,8 @@ interface Env {
   BUSINESS_PHONE: string;
   CONVOAI_AGENT_ID: string;
   OWNER_PHONE: string; // Commander's phone for emergency forwarding
+  ADMIN_API_KEY: string; // gates /setup/* routes
+  CONVOAI_WEBHOOK_SECRET: string; // shared secret ElevenLabs sends back on every /convoai/tools call
 }
 
 // ============================================================================
@@ -736,6 +738,9 @@ async function handleForwardToOwner(params: any, env: Env): Promise<string> {
 // ============================================================================
 
 async function createOrUpdateAgent(env: Env): Promise<{ agent_id: string }> {
+  if (!env.CONVOAI_WEBHOOK_SECRET) {
+    throw new Error('CONVOAI_WEBHOOK_SECRET not set -- refusing to publish an agent config whose tool webhook would have no auth header');
+  }
   const prompt = buildAgentPrompt();
   const tools = getToolDefinitions();
 
@@ -764,9 +769,15 @@ async function createOrUpdateAgent(env: Env): Promise<{ agent_id: string }> {
         api_schema: {
           url: webhookUrl,
           method: 'POST',
-          headers: {
+          // `request_headers` (not `headers`) is the field ElevenLabs actually reads for
+          // webhook-tool config. CONVOAI_WEBHOOK_SECRET here is how /convoai/tools verifies
+          // the call genuinely came from our agent -- see verifyConvoAISecret(). Passed as a
+          // plain value rather than an env_var_label indirection for now (see SECURITY.md for
+          // the tradeoff and future-hardening note).
+          request_headers: {
             'Content-Type': 'application/json',
             'X-Tool-Name': t.name,
+            'X-ConvoAI-Secret': env.CONVOAI_WEBHOOK_SECRET || '',
           },
           request_body: t.parameters,
         },
@@ -846,6 +857,64 @@ async function configureTwilioWebhook(env: Env, phoneNumberSid: string): Promise
 }
 
 // ============================================================================
+// AUTH — Twilio webhook signatures, ConvoAI shared secret, admin key
+// ============================================================================
+// None of /twilio/*, /convoai/tools, or /setup/* verified their caller at all.
+// That meant: anyone could POST a forged Twilio-shaped request, anyone could
+// POST directly to /convoai/tools to send arbitrary SMS from the business's
+// real Twilio number or write bogus bookings into the live schedule, and
+// anyone could POST to /setup/agent to silently rewrite the live voice
+// agent's system prompt/behavior using our own paid ElevenLabs key.
+
+export function timingSafeEqual(a: string, b: string): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+// Twilio's exact algorithm (github.com/twilio/twilio-node webhooks.ts):
+// HMAC-SHA1(authToken, url + sorted(params).reduce((acc,[k,v]) => acc+k+v, "")), base64.
+export async function computeTwilioSignature(authToken: string, url: string, params: Record<string, string>): Promise<string> {
+  const data = Object.keys(params)
+    .sort()
+    .reduce((acc, key) => acc + key + params[key], url);
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(authToken), { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data));
+  // btoa over the raw signature bytes (base64, matching Twilio's own encoding)
+  let binary = '';
+  for (const b of new Uint8Array(sig)) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
+export async function verifyTwilioSignature(request: Request, formParams: Record<string, string>, env: Env): Promise<boolean> {
+  if (!env.TWILIO_AUTH_TOKEN) return false;
+  const provided = request.headers.get('X-Twilio-Signature') || '';
+  if (!provided) return false;
+  const expected = await computeTwilioSignature(env.TWILIO_AUTH_TOKEN, request.url, formParams);
+  return timingSafeEqual(provided, expected);
+}
+
+export function verifyConvoAISecret(request: Request, env: Env): boolean {
+  if (!env.CONVOAI_WEBHOOK_SECRET) return false;
+  const provided = request.headers.get('X-ConvoAI-Secret') || '';
+  return timingSafeEqual(provided, env.CONVOAI_WEBHOOK_SECRET);
+}
+
+export function requireAdminAuth(request: Request, env: Env): Response | null {
+  if (!env.ADMIN_API_KEY) {
+    return new Response(JSON.stringify({ error: 'Service misconfigured: ADMIN_API_KEY not set' }), { status: 503, headers: { 'Content-Type': 'application/json' } });
+  }
+  const key = request.headers.get('X-Echo-API-Key') || (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!timingSafeEqual(key, env.ADMIN_API_KEY)) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+  }
+  return null;
+}
+
+// ============================================================================
 // HONO APP — ROUTES
 // ============================================================================
 
@@ -903,6 +972,12 @@ app.get('/', (c) => {
 // TWILIO VOICE WEBHOOK — Returns TwiML to connect call to ConvoAI
 // ---------------------------------------------------------------------------
 app.post('/twilio/voice', async (c) => {
+  const formData = (await c.req.parseBody()) as Record<string, string>;
+  if (!(await verifyTwilioSignature(c.req.raw, formData, c.env))) {
+    log('warn', 'Rejected /twilio/voice: invalid or missing X-Twilio-Signature');
+    return c.text('Forbidden', 403);
+  }
+
   const agentId = c.env.CONVOAI_AGENT_ID;
 
   if (!agentId) {
@@ -936,6 +1011,12 @@ app.post('/twilio/voice', async (c) => {
 // TWILIO CALL FORWARD — Transfers call to owner for emergencies
 // ---------------------------------------------------------------------------
 app.post('/twilio/forward', async (c) => {
+  const formData = (await c.req.parseBody()) as Record<string, string>;
+  if (!(await verifyTwilioSignature(c.req.raw, formData, c.env))) {
+    log('warn', 'Rejected /twilio/forward: invalid or missing X-Twilio-Signature');
+    return c.text('Forbidden', 403);
+  }
+
   const ownerPhone = c.env.OWNER_PHONE || '+14322248166';
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -954,7 +1035,11 @@ app.post('/twilio/forward', async (c) => {
 // ---------------------------------------------------------------------------
 app.post('/twilio/status', async (c) => {
   try {
-    const formData = await c.req.parseBody();
+    const formData = (await c.req.parseBody()) as Record<string, string>;
+    if (!(await verifyTwilioSignature(c.req.raw, formData, c.env))) {
+      log('warn', 'Rejected /twilio/status: invalid or missing X-Twilio-Signature');
+      return c.text('Forbidden', 403);
+    }
     const callSid = formData['CallSid'] as string;
     const status = formData['CallStatus'] as string;
     const from = formData['From'] as string;
@@ -982,6 +1067,10 @@ app.post('/twilio/status', async (c) => {
 // CONVOAI TOOL EXECUTION WEBHOOK — Called by ConvoAI during conversations
 // ---------------------------------------------------------------------------
 app.post('/convoai/tools', async (c) => {
+  if (!verifyConvoAISecret(c.req.raw, c.env)) {
+    log('warn', 'Rejected /convoai/tools: invalid or missing X-ConvoAI-Secret');
+    return c.json({ error: 'Forbidden' }, 403);
+  }
   try {
     const body = await c.req.json().catch(() => ({}));
     const toolName = c.req.header('X-Tool-Name') || body.tool_name || body.name;
@@ -1002,6 +1091,8 @@ app.post('/convoai/tools', async (c) => {
 // SETUP: Create/Update ConvoAI Agent
 // ---------------------------------------------------------------------------
 app.post('/setup/agent', async (c) => {
+  const authError = requireAdminAuth(c.req.raw, c.env);
+  if (authError) return authError;
   try {
     if (!c.env.ELEVENLABS_API_KEY) {
       return c.json({ error: 'ELEVENLABS_API_KEY not configured' }, 400);
@@ -1026,6 +1117,8 @@ app.post('/setup/agent', async (c) => {
 // SETUP: Configure Twilio phone number webhook
 // ---------------------------------------------------------------------------
 app.post('/setup/twilio', async (c) => {
+  const authError = requireAdminAuth(c.req.raw, c.env);
+  if (authError) return authError;
   try {
     const body = await c.req.json().catch(() => ({})) as any;
     const phoneNumberSid = body.phone_number_sid;
@@ -1092,6 +1185,8 @@ app.get('/schedule/:date', async (c) => {
 // UTILITY: Init call_logs table
 // ---------------------------------------------------------------------------
 app.post('/setup/db', async (c) => {
+  const authError = requireAdminAuth(c.req.raw, c.env);
+  if (authError) return authError;
   try {
     await c.env.DB.exec(`CREATE TABLE IF NOT EXISTS call_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, call_sid TEXT, caller_number TEXT, status TEXT, duration_seconds INTEGER, agent_id TEXT, notes TEXT, created_at TEXT DEFAULT (datetime('now')))`);
     await c.env.DB.exec(`CREATE INDEX IF NOT EXISTS idx_call_logs_created ON call_logs(created_at DESC)`);
