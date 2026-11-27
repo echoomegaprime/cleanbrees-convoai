@@ -27,3 +27,27 @@ dataset = "echo_metrics"
 # ADMIN_API_KEY        - gates POST /setup/agent, /setup/twilio, /setup/db
 # CONVOAI_WEBHOOK_SECRET - shared secret ElevenLabs echoes back on every POST /convoai/tools call;
 #                          createOrUpdateAgent() refuses to publish an agent config if this is unset
+
+# ---------------------------------------------------------------------------
+# NEW Cloudflare account (af149dc6...5627, workers.dev subdomain echo-prime).
+# Deploy with: npx wrangler deploy --env new
+# Secrets already on the NEW worker (names only): ELEVENLABS_API_KEY, GOOGLE_MAPS_API_KEY,
+# OWNER_PHONE, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN. ADMIN_API_KEY and CONVOAI_WEBHOOK_SECRET
+# are intentionally unset there until provisioned through the vault, so /setup/* and
+# /schedule/* fail closed (503) and /convoai/tools rejects every caller (403).
+# ---------------------------------------------------------------------------
+[env.new]
+name = "cleanbrees-convoai"
+account_id = "af149dc635e37df9b0d30d80e44e5627"
+workers_dev = true
+preview_urls = true
+
+[env.new.vars]
+CLEANBREES_API_URL = "https://cleanbrees-api.echo-prime.workers.dev"
+BREE_VOICE_ID = "pzKXffibtCDxnrVO8d1U"
+BUSINESS_PHONE = "+14329997402"
+
+[[env.new.d1_databases]]
+binding = "DB"
+database_name = "cleanbrees-db"
+database_id = "5b70c800-d0ea-4873-a4f8-a2b4e74a350b"

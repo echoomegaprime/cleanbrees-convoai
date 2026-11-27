@@ -13,6 +13,7 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { WorkerEntrypoint } from 'cloudflare:workers';
 
 // ============================================================================
 // STRUCTURED LOGGING
@@ -664,36 +665,58 @@ async function handleGetDirections(params: any, env: Env): Promise<string> {
   }
 }
 
+interface TwilioSendResult {
+  ok: boolean;
+  status: number;
+  /** Twilio's numeric error code when it rejects the message (e.g. 20003, 21608); null otherwise. */
+  code: number | null;
+  /** Raw error body. Only handleSendSMS repeats it; OwnerNotify never returns or logs it. */
+  text: string;
+}
+
+async function twilioSendSms(to: string, body: string, env: Env): Promise<TwilioSendResult> {
+  let toNumber = to.replace(/[^\d+]/g, '');
+  if (!toNumber.startsWith('+')) toNumber = '+1' + toNumber;
+
+  const resp = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Basic ' + btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`),
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        To: toNumber,
+        From: env.BUSINESS_PHONE || '+14329997402',
+        Body: body,
+      }),
+    }
+  );
+
+  if (resp.ok) return { ok: true, status: resp.status, code: null, text: '' };
+  const text = await resp.text();
+  let code: number | null = null;
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed.code === 'number') code = parsed.code;
+  } catch {
+    // Non-JSON error body: keep code null and report the HTTP status instead.
+  }
+  return { ok: false, status: resp.status, code, text };
+}
+
 async function handleSendSMS(params: any, env: Env): Promise<string> {
   if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_AUTH_TOKEN) {
     return 'SMS service is not configured.';
   }
 
   try {
-    let toNumber = params.to.replace(/[^\d+]/g, '');
-    if (!toNumber.startsWith('+')) toNumber = '+1' + toNumber;
-
-    const resp = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Basic ' + btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`),
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({
-          To: toNumber,
-          From: env.BUSINESS_PHONE || '+14329997402',
-          Body: params.message,
-        }),
-      }
-    );
-
-    if (resp.ok) {
+    const res = await twilioSendSms(params.to, params.message, env);
+    if (res.ok) {
       return `SMS sent successfully to ${params.to}!`;
     }
-    const err = await resp.text();
-    return `Failed to send SMS: ${err}`;
+    return `Failed to send SMS: ${res.text}`;
   } catch (err: any) {
     return `SMS error: ${err.message}`;
   }
@@ -1176,6 +1199,9 @@ app.get('/quote', (c) => {
 // UTILITY: Check schedule via HTTP (for testing)
 // ---------------------------------------------------------------------------
 app.get('/schedule/:date', async (c) => {
+  // Returns customer names and addresses: owner/admin only, fails closed (503) when ADMIN_API_KEY is unset.
+  const authError = requireAdminAuth(c.req.raw, c.env);
+  if (authError) return authError;
   const date = c.req.param('date');
   const result = await handleCheckSchedule({ date }, c.env);
   return c.json({ date, schedule: result });
@@ -1208,5 +1234,65 @@ app.onError((err, c) => {
 app.notFound((c) => {
   return c.json({ error: 'Not found' }, 404);
 });
+
+// ============================================================================
+// OWNER NOTIFY — named RPC entrypoint used by cleanbrees-api POST /api/contact
+// (service binding CONVOAI -> cleanbrees-convoai#OwnerNotify). Named entrypoints
+// are reachable only through a service binding, never from the public internet.
+// It returns status only: never the owner's number or Twilio's response body.
+// ============================================================================
+
+export interface ContactLead {
+  ref?: string;
+  name?: string;
+  email?: string;
+  phone?: string;
+  message?: string;
+}
+
+export interface OwnerNotifyResult {
+  sent: boolean;
+  /** ok | owner_phone_unset | twilio_unset | twilio_<code> | twilio_http_<status> | sms_exception */
+  reason: string;
+}
+
+function clip(value: unknown, max: number): string {
+  return String(value == null ? '' : value)
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+
+export function contactLeadSms(lead: ContactLead): string {
+  const ref = clip(lead.ref, 40);
+  return `[Clean Bree's] New website message${ref ? ' ' + ref : ''} from ${clip(lead.name, 60) || 'unknown'} | ${clip(lead.phone, 25) || 'no phone'} | ${clip(lead.email, 80) || 'no email'}: ${clip(lead.message, 300)}`;
+}
+
+export async function notifyOwnerOfContactLead(lead: ContactLead, env: Env): Promise<OwnerNotifyResult> {
+  if (!env.OWNER_PHONE) return { sent: false, reason: 'owner_phone_unset' };
+  if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_AUTH_TOKEN) return { sent: false, reason: 'twilio_unset' };
+  const safeLead: ContactLead = lead && typeof lead === 'object' ? lead : {};
+  const ref = clip(safeLead.ref, 40);
+  try {
+    const res = await twilioSendSms(String(env.OWNER_PHONE), contactLeadSms(safeLead), env);
+    if (res.ok) {
+      log('info', 'Contact lead owner SMS', { sent: true, ref });
+      return { sent: true, reason: 'ok' };
+    }
+    const reason = res.code !== null ? `twilio_${res.code}` : `twilio_http_${res.status}`;
+    log('warn', 'Contact lead owner SMS', { sent: false, ref, reason });
+    return { sent: false, reason };
+  } catch (err) {
+    log('warn', 'Contact lead owner SMS threw', { ref, error: (err as Error)?.message || String(err) });
+    return { sent: false, reason: 'sms_exception' };
+  }
+}
+
+export class OwnerNotify extends WorkerEntrypoint<Env> {
+  async contactLead(lead: ContactLead): Promise<OwnerNotifyResult> {
+    return notifyOwnerOfContactLead(lead, this.env);
+  }
+}
 
 export default app;
